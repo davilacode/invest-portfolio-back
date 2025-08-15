@@ -21,9 +21,9 @@ db.sqlite3
 .env
 .env.*
 
-# Migrations
-**/migrations/*
-!**/migrations/__init__.py
+# Migrations: se versionan
+**/migrations/__pycache__/
+**/migrations/*.py[cod]
 
 # OS
 .DS_Store
