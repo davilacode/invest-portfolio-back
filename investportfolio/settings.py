@@ -140,17 +140,12 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 # Custom user model
 AUTH_USER_MODEL = 'accounts.User'
 
+ALLOWED_ORIGINS = os.environ.get('ALLOWED_ORIGINS', '').split(',')
 
-CORS_ALLOWED_ORIGINS = [
-    'http://localhost:5173',
-    'http://127.0.0.1:5173',
-]
+CORS_ALLOWED_ORIGINS = ALLOWED_ORIGINS
 
 # Allow cookies (sessionid, csrftoken) to be included in cross-origin requests
 CORS_ALLOW_CREDENTIALS = True
 
 # Needed for POSTing to session-auth endpoints from that origin
-CSRF_TRUSTED_ORIGINS = [
-    'http://localhost:5173',
-    'http://127.0.0.1:5173',
-]
+CSRF_TRUSTED_ORIGINS = ALLOWED_ORIGINS
