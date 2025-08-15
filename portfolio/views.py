@@ -7,11 +7,10 @@ from .models import Portfolio, Asset, AssetTransaction
 from .serializers import PortfolioSerializer, AssetSerializer, AssetTransactionSerializer
 from django.db import transaction
 import yfinance as yf
-from .helpers import asset_performance
+from .helpers import asset_weighted_performance
 
 class IsOwner(permissions.BasePermission):
     def has_permission(self, request, view):
-        # Requiere autenticación para cualquier acción.
         return bool(request.user and request.user.is_authenticated)
 
     def has_object_permission(self, request, view, obj):
@@ -26,11 +25,112 @@ class PortfolioViewSet(viewsets.ModelViewSet):
     permission_classes = [permissions.IsAuthenticated, IsOwner]
 
     def get_queryset(self):
-
         return Portfolio.objects.filter(owner=self.request.user).prefetch_related('assets')
 
     def perform_create(self, serializer):
         serializer.save(owner=self.request.user)
+
+    def retrieve(self, request, *args, **kwargs):
+        """GET /api/portfolios/<id>/
+        Devuelve los datos originales del portfolio más:
+          - performance del portfolio (coste total, valor actual, ganancia/pérdida, %)
+          - performance por asset
+          - performance por transacción (incluida dentro de cada asset)
+        """
+        instance = self.get_object()
+        serializer = self.get_serializer(instance)
+        assets = instance.assets.all().prefetch_related('transactions')
+
+        from decimal import Decimal as D
+        total_cost = D('0')
+        total_profit_loss = D('0')
+
+        perf_by_asset_id = {}
+        for asset in assets:
+            perf = asset_weighted_performance(asset)
+            perf_by_asset_id[asset.id] = perf
+            if 'error' not in perf:
+                total_cost += D(str(perf.get('total_cost', 0)))
+                total_profit_loss += D(str(perf.get('total_profit_loss', 0)))
+
+        if total_cost > 0:
+            performance_pct = (total_profit_loss / total_cost) * 100
+        else:
+            performance_pct = D('0')
+        current_value = total_cost + total_profit_loss
+
+        data = dict(serializer.data)
+
+        enriched_assets = []
+        for asset_item in data.get('assets', []):
+            aid = asset_item.get('id')
+            perf = perf_by_asset_id.get(aid, {})
+            if perf and 'error' not in perf:
+                # Merge transaction-level performance into existing serializer transactions.
+                base_transactions = asset_item.get('transactions', []) or []
+                perf_transactions = perf.get('transactions') or []
+                enriched_tx = []
+                if perf_transactions:
+ 
+                    from collections import defaultdict
+                    perf_queue = list(perf_transactions)
+                    
+                    if len(base_transactions) == len(perf_queue):
+                        
+                        if len(base_transactions) > 1 and base_transactions[0]['created_at'] > base_transactions[-1]['created_at']:
+
+                            ordered_base = list(reversed(base_transactions))
+                        else:
+                            ordered_base = list(base_transactions)
+                        merged_ordered = []
+                        for b, p in zip(ordered_base, perf_queue):
+                            merged = {
+                                'id': b.get('id'),
+                                'created_at': b.get('created_at'),
+                                # Replace price with buy_price for clarity.
+                                'price': p.get('buy_price', b.get('price')),
+                                'quantity': p.get('quantity', b.get('quantity')),
+                                'actual_price': p.get('actual_price'),
+                                'profit_loss': p.get('profit_loss'),
+                                'performance_pct': p.get('performance_pct'),
+                            }
+                            merged_ordered.append(merged)
+                        # Restore original order of base list.
+                        if ordered_base is not base_transactions:
+                            merged_ordered = list(reversed(merged_ordered))
+                        enriched_tx = merged_ordered
+                    else:
+                        for p in perf_queue:
+                            enriched_tx.append({
+                                'price': p.get('buy_price'),
+                                'quantity': p.get('quantity'),
+                                'actual_price': p.get('actual_price'),
+                                'profit_loss': p.get('profit_loss'),
+                                'performance_pct': p.get('performance_pct'),
+                            })
+                else:
+                    enriched_tx = base_transactions
+
+                asset_item.update({
+                    'total_cost': perf.get('total_cost'),
+                    'actual_value': perf.get('actual_value'),
+                    'total_profit_loss': perf.get('total_profit_loss'),
+                    'performance_pct': perf.get('performance'),
+                    'total_quantity_calc': perf.get('total_quantity'),
+                    'transactions': enriched_tx,
+                })
+            else:
+                asset_item.update({'performance_error': perf.get('error', 'No performance data')})
+            enriched_assets.append(asset_item)
+        data['assets'] = enriched_assets
+        # Métricas agregadas del portafolio a nivel raíz (sin nueva clave agrupadora).
+        data.update({
+            'total_cost': float(round(total_cost, 2)),
+            'current_value': float(round(current_value, 2)),
+            'total_profit_loss': float(round(total_profit_loss, 2)),
+            'performance_pct': float(round(performance_pct, 2)),
+        })
+        return Response(data)
 
     @action(detail=True, methods=["post"], url_path="assets")
     def add_asset(self, request, pk=None):
@@ -39,7 +139,7 @@ class PortfolioViewSet(viewsets.ModelViewSet):
         Crea un nuevo asset dentro del portfolio especificado. Ignora cualquier valor de 'portfolio' enviado
         en el payload y fuerza la asociación al portfolio de la URL.
         """
-        portfolio = self.get_object()  # Dispara comprobación de permisos de objeto.
+        portfolio = self.get_object()
         data = request.data.copy()
         data.pop('portfolio', None) 
         serializer = AssetSerializer(data=data)
@@ -48,7 +148,7 @@ class PortfolioViewSet(viewsets.ModelViewSet):
         qty_new = serializer.validated_data['quantity']
         price_new = serializer.validated_data['average_price']
         with transaction.atomic():
-            # Bloquea la fila del asset existente (si existe) para evitar condiciones de carrera.
+            
             asset = (
                 Asset.objects.select_for_update()
                 .filter(portfolio=portfolio, symbol=symbol)
@@ -77,21 +177,29 @@ class PortfolioViewSet(viewsets.ModelViewSet):
     def get_dashboard_info(self, request):
         portfolios = Portfolio.objects.filter(owner=request.user).prefetch_related('assets')
         total_portfolios = portfolios.count()
-        total_value = 0
-        assets_performance = []
+        total_investment_cost = 0
+        total_profit_loss = 0
 
         for portfolio in portfolios:
             for asset in portfolio.assets.all():
-                
-                print("DEBUG asset:", asset)
-                total_value += asset.quantity * asset.average_price
-                perf = asset_performance(asset)
-                assets_performance.append(perf)
+                perf = asset_weighted_performance(asset)
+                if 'error' not in perf:
+                    total_investment_cost += perf.get('total_cost', 0)
+                    total_profit_loss += perf.get('total_profit_loss', 0)
+
+        if total_investment_cost > 0:
+            total_performance_pct = (total_profit_loss / total_investment_cost) * 100
+        else:
+            total_performance_pct = 0
+        
+        total_current_value = total_investment_cost + total_profit_loss
 
         return Response({
-            "total_assets_value": total_value,
+            "total_current_value": total_current_value,
+            "total_investment_cost": total_investment_cost,
+            "total_profit_loss": total_profit_loss,
             "total_portfolios": total_portfolios,
-            "assets_performance": assets_performance,
+            "total_performance_pct": total_performance_pct,
             "portfolios": PortfolioSerializer(portfolios, many=True).data
         })
 
