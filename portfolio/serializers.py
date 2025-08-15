@@ -9,6 +9,7 @@ class AssetTransactionSerializer(serializers.ModelSerializer):
 
 
 class AssetSerializer(serializers.ModelSerializer):
+    portfolio = serializers.PrimaryKeyRelatedField(read_only=True)
     transactions = AssetTransactionSerializer(many=True, read_only=True)
 
     class Meta:

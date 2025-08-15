@@ -1,3 +1,4 @@
+
 from rest_framework import viewsets, permissions, status
 from rest_framework.views import APIView
 from rest_framework.response import Response
@@ -6,6 +7,7 @@ from .models import Portfolio, Asset, AssetTransaction
 from .serializers import PortfolioSerializer, AssetSerializer, AssetTransactionSerializer
 from django.db import transaction
 import yfinance as yf
+from .helpers import asset_performance
 
 class IsOwner(permissions.BasePermission):
     def has_permission(self, request, view):
@@ -24,7 +26,7 @@ class PortfolioViewSet(viewsets.ModelViewSet):
     permission_classes = [permissions.IsAuthenticated, IsOwner]
 
     def get_queryset(self):
-        # Prefetch de assets relacionados para evitar consultas N+1 al listar/recuperar portfolios.
+
         return Portfolio.objects.filter(owner=self.request.user).prefetch_related('assets')
 
     def perform_create(self, serializer):
@@ -38,7 +40,9 @@ class PortfolioViewSet(viewsets.ModelViewSet):
         en el payload y fuerza la asociación al portfolio de la URL.
         """
         portfolio = self.get_object()  # Dispara comprobación de permisos de objeto.
-        serializer = AssetSerializer(data=request.data)
+        data = request.data.copy()
+        data.pop('portfolio', None) 
+        serializer = AssetSerializer(data=data)
         serializer.is_valid(raise_exception=True)
         symbol = serializer.validated_data['symbol']
         qty_new = serializer.validated_data['quantity']
@@ -66,6 +70,30 @@ class PortfolioViewSet(viewsets.ModelViewSet):
             AssetTransaction.objects.create(asset=asset, quantity=qty_new, price=price_new)
         out = AssetSerializer(asset, context={'request': request})
         return Response(out.data, status=status.HTTP_201_CREATED)
+
+
+    # suma total de los activos del portafolio
+    @action(detail=False, methods=["get"], url_path="dashboard")
+    def get_dashboard_info(self, request):
+        portfolios = Portfolio.objects.filter(owner=request.user).prefetch_related('assets')
+        total_portfolios = portfolios.count()
+        total_value = 0
+        assets_performance = []
+
+        for portfolio in portfolios:
+            for asset in portfolio.assets.all():
+                
+                print("DEBUG asset:", asset)
+                total_value += asset.quantity * asset.average_price
+                perf = asset_performance(asset)
+                assets_performance.append(perf)
+
+        return Response({
+            "total_assets_value": total_value,
+            "total_portfolios": total_portfolios,
+            "assets_performance": assets_performance,
+            "portfolios": PortfolioSerializer(portfolios, many=True).data
+        })
 
 class AssetViewSet(viewsets.ModelViewSet):
     serializer_class = AssetSerializer

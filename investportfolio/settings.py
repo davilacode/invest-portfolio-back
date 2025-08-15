@@ -155,3 +155,5 @@ SESSION_COOKIE_SECURE = True
 
 # Needed for POSTing to session-auth endpoints from that origin
 CSRF_TRUSTED_ORIGINS = ALLOWED_ORIGINS
+
+APPEND_SLASH=True
