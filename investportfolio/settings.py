@@ -147,5 +147,11 @@ CORS_ALLOWED_ORIGINS = ALLOWED_ORIGINS
 # Allow cookies (sessionid, csrftoken) to be included in cross-origin requests
 CORS_ALLOW_CREDENTIALS = True
 
+CSRF_COOKIE_SAMESITE = 'None'
+CSRF_COOKIE_SECURE = False
+
+SESSION_COOKIE_SAMESITE = 'None'
+SESSION_COOKIE_SECURE = False
+
 # Needed for POSTing to session-auth endpoints from that origin
 CSRF_TRUSTED_ORIGINS = ALLOWED_ORIGINS
